@@ -15,9 +15,10 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
  *     mountHallStopId: string;
  *     busModelUrl: string;
  *   };
+ *   reportError?: (message: string) => void;
  * }} options
  */
-export function createBusTracker({ appEl, mapEl, statusEl, config }) {
+export function createBusTracker({ appEl, mapEl, statusEl, config, reportError = () => {} }) {
   const DATA_URL = config.dataUrl;
   const ROUTE_URL = config.routeUrl;
   const REFRESH_MS = 10000;
@@ -34,6 +35,7 @@ export function createBusTracker({ appEl, mapEl, statusEl, config }) {
   const MAPBOX_TOKEN = config.mapboxToken;
 
   if (!MAPBOX_TOKEN) {
+    reportError('Missing PUBLIC_MAPBOX_TOKEN in .env.');
     statusEl.innerHTML = `
       <strong>OSU Campus Bus Demo</strong>
       Missing <code>PUBLIC_MAPBOX_TOKEN</code> in <code>.env</code>.
@@ -108,6 +110,12 @@ export function createBusTracker({ appEl, mapEl, statusEl, config }) {
 
   map.on('style.load', () => {
     addBusLayerIfNeeded();
+  });
+
+  map.on('error', (event) => {
+    const message =
+      event?.error?.message || event?.error?.toString?.() || 'Unknown Mapbox error';
+    reportError(`Mapbox error: ${message}`);
   });
 
   async function fetchVehicles() {
@@ -520,10 +528,19 @@ export function createBusTracker({ appEl, mapEl, statusEl, config }) {
         busScene.add(new THREE.AmbientLight(0xffffff, 1));
 
         const loader = new GLTFLoader();
-        loader.load(BUS_MODEL_URL, (gltf) => {
-          busModelTemplate = gltf.scene;
-          busModelReady = true;
-        });
+        loader.load(
+          BUS_MODEL_URL,
+          (gltf) => {
+            busModelTemplate = gltf.scene;
+            busModelReady = true;
+          },
+          undefined,
+          (error) => {
+            reportError(
+              `3D model failed to load: ${error?.message || error?.toString?.() || BUS_MODEL_URL}`
+            );
+          }
+        );
 
         busRenderer = new THREE.WebGLRenderer({
           canvas: layerMap.getCanvas(),
@@ -924,6 +941,9 @@ export function createBusTracker({ appEl, mapEl, statusEl, config }) {
       renderVehicles(vehicles, nextVehicle?.id ?? null);
       renderStatus(vehicles, arrivals);
     } catch (error) {
+      reportError(
+        `Refresh failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
       statusEl.innerHTML = `
         <strong>OSU Campus Bus Demo</strong>
         Error loading data: ${error instanceof Error ? error.message : 'Unknown error'}<br />

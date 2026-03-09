@@ -12,35 +12,83 @@
   let mapEl;
   let statusEl;
   let tracker;
+  let errors = [];
+
+  function normalizeErrorMessage(input) {
+    if (input instanceof Error) {
+      return input.stack || input.message;
+    }
+
+    if (typeof input === 'string') {
+      return input;
+    }
+
+    try {
+      return JSON.stringify(input);
+    } catch {
+      return String(input);
+    }
+  }
+
+  function pushError(message) {
+    const normalized = normalizeErrorMessage(message);
+    if (!normalized) {
+      return;
+    }
+
+    errors = [normalized, ...errors.filter((entry) => entry !== normalized)].slice(0, 6);
+  }
+
+  function dismissErrors() {
+    errors = [];
+  }
 
   onMount(() => {
     let disposed = false;
 
-    async function start() {
-      const { createBusTracker } = await import('$lib/bus-tracker.js');
-      if (disposed) {
-        return;
-      }
+    const handleWindowError = (event) => {
+      pushError(event.error || event.message || 'Unknown window error');
+    };
 
-      tracker = createBusTracker({
-        appEl,
-        mapEl,
-        statusEl,
-        config: {
-          dataUrl: PUBLIC_DATA_URL,
-          routeUrl: PUBLIC_ROUTE_URL,
-          mapStyle: PUBLIC_MAP_STYLE,
-          mapboxToken: PUBLIC_MAPBOX_TOKEN,
-          mountHallStopId: PUBLIC_MOUNT_HALL_STOP_ID || '501',
-          busModelUrl: '/Bus.glb'
+    const handleUnhandledRejection = (event) => {
+      pushError(event.reason || 'Unhandled promise rejection');
+    };
+
+    window.addEventListener('error', handleWindowError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+
+    async function start() {
+      try {
+        const { createBusTracker } = await import('$lib/bus-tracker.js');
+        if (disposed) {
+          return;
         }
-      });
+
+        tracker = createBusTracker({
+          appEl,
+          mapEl,
+          statusEl,
+          reportError: pushError,
+          config: {
+            dataUrl: PUBLIC_DATA_URL,
+            routeUrl: PUBLIC_ROUTE_URL,
+            mapStyle: PUBLIC_MAP_STYLE,
+            mapboxToken: PUBLIC_MAPBOX_TOKEN,
+            mountHallStopId: PUBLIC_MOUNT_HALL_STOP_ID || '501',
+            busModelUrl: '/Bus.glb'
+          }
+        });
+      } catch (error) {
+        pushError(error);
+      }
     }
 
     void start();
 
     return () => {
       disposed = true;
+      window.removeEventListener('error', handleWindowError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
       tracker?.destroy();
     };
   });
@@ -51,6 +99,20 @@
 </svelte:head>
 
 <div bind:this={appEl} id="app" class="relative h-screen min-h-[100dvh] w-screen overflow-hidden">
+  {#if errors.length > 0}
+    <aside class="error-panel">
+      <div class="error-panel-header">
+        <strong>Captured errors</strong>
+        <button class="error-dismiss" type="button" on:click={dismissErrors}>Clear</button>
+      </div>
+      <ul class="error-list">
+        {#each errors as error}
+          <li>{error}</li>
+        {/each}
+      </ul>
+    </aside>
+  {/if}
+
   <div bind:this={statusEl} class="status" id="status">Loading live vehicles...</div>
   <div bind:this={mapEl} id="map"></div>
 </div>
@@ -92,6 +154,60 @@
     gap: 0;
     white-space: nowrap;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .error-panel {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 1200;
+    width: min(520px, calc(100vw - 24px));
+    max-height: min(45vh, 360px);
+    overflow: auto;
+    border: 1px solid rgba(248, 113, 113, 0.28);
+    background: rgba(32, 12, 16, 0.92);
+    color: #ffe4e6;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-radius: 12px;
+    padding: 10px 12px;
+    line-height: 1.35;
+    pointer-events: auto;
+  }
+
+  .error-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .error-dismiss {
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.06);
+    color: inherit;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font: inherit;
+  }
+
+  .error-list {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 12px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .error-list li + li {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
   }
 
   :global(.hud-time) {
@@ -234,6 +350,13 @@
   }
 
   @media (max-width: 640px) {
+    .error-panel {
+      left: 12px;
+      right: 12px;
+      width: auto;
+      max-height: 36vh;
+    }
+
     .status {
       white-space: normal;
       flex-wrap: wrap;
