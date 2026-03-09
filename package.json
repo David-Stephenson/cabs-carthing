@@ -1,0 +1,40 @@
+{
+  "name": "cabs-testing",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static SvelteKit bus tracker for the OSU CABS Mount Hall stop",
+  "scripts": {
+    "sync": "svelte-kit sync",
+    "dev": "svelte-kit sync && vite dev",
+    "build": "svelte-kit sync && vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/David-Stephenson/cabs-carthing.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/David-Stephenson/cabs-carthing/issues"
+  },
+  "homepage": "https://github.com/David-Stephenson/cabs-carthing#readme",
+  "devDependencies": {
+    "@sveltejs/adapter-vercel": "^6.3.3",
+    "@sveltejs/kit": "^2.53.4",
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "@tailwindcss/vite": "^4.2.1",
+    "svelte": "^5.53.8",
+    "svelte-check": "^4.4.5",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  },
+  "dependencies": {
+    "mapbox-gl": "^3.18.0",
+    "three": "^0.180.0"
+  }
+}
