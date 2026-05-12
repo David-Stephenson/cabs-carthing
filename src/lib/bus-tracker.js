@@ -2,7 +2,42 @@ import mapboxgl from 'mapbox-gl';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
+import {
+  BUS_MODEL_HEADING_OFFSET,
+  BUS_MODEL_SCALE,
+  FOLLOW_BEARING,
+  FOLLOW_OFFSET,
+  FOLLOW_PITCH,
+  FOLLOW_ZOOM,
+  LAYER,
+  OSU_CENTER,
+  REFRESH_MS
+} from './bus/constants.js';
+import { buildFleetRows, findArrivals, getActionMessage } from './bus/fleet.js';
+import { decodePolyline, toRadians } from './bus/geo.js';
+import {
+  createRouteSnapper,
+  getVehiclePoseFromSnap,
+  normalizeHeading
+} from './bus/route-snap.js';
+
 /**
+ * @typedef {{
+ *   vehicleId: string;
+ *   busId: string | null;
+ *   destination: string | null;
+ *   seconds: number | null;
+ *   distanceFeet: number | null;
+ *   predictionTime: string | null;
+ *   isDelayed: boolean;
+ *   countdownLabel: string | null;
+ *   nextStopName: string | null;
+ * }} FleetRow
+ */
+
+/**
+ * Live Mapbox + Three.js bus corridor tracker for a single route/stop pair.
+ *
  * @param {{
  *   appEl: HTMLElement;
  *   mapEl: HTMLElement;
@@ -12,29 +47,35 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
  *     routeUrl: string;
  *     mapStyle: string;
  *     mapboxToken: string;
- *     mountHallStopId: string;
+ *     stopId: string;
+ *     stopName?: string;
  *     busModelUrl: string;
  *   };
  *   reportError?: (message: string) => void;
+ *   onFleetUpdate?: (fleet: FleetRow[]) => void;
  * }} options
  */
-export function createBusTracker({ appEl, mapEl, statusEl, config, reportError = () => {} }) {
-  const DATA_URL = config.dataUrl;
-  const ROUTE_URL = config.routeUrl;
-  const REFRESH_MS = 10000;
-  const OSU_CENTER = [40.0054, -83.0305];
-  const MOUNT_HALL_STOP_ID = config.mountHallStopId;
-  const FOLLOW_ZOOM = 16.5;
-  const FOLLOW_PITCH = 55;
-  const FOLLOW_BEARING = 0;
-  const FOLLOW_OFFSET = [0, 100];
-  const BUS_MODEL_URL = config.busModelUrl;
-  const BUS_MODEL_SCALE = 0.25;
-  const BUS_MODEL_HEADING_OFFSET = 180;
-  const MAP_STYLE = config.mapStyle;
-  const MAPBOX_TOKEN = config.mapboxToken;
+export function createBusTracker({
+  appEl,
+  mapEl,
+  statusEl,
+  config,
+  reportError = () => {},
+  onFleetUpdate = () => {}
+}) {
+  let dataUrl = config.dataUrl;
+  let routeUrl = config.routeUrl;
+  let targetStopId = String(config.stopId);
+  let targetStopName = config.stopName ?? 'Selected stop';
+  const busModelUrl = config.busModelUrl;
+  const mapStyle = config.mapStyle;
+  const mapboxToken = config.mapboxToken;
 
-  if (!MAPBOX_TOKEN) {
+  /** @type {[number, number][][]} decoded corridor rings as [lng, lat][] */
+  let routePaths = [];
+  const { snapToRoute, resetPathTracker } = createRouteSnapper(() => routePaths);
+
+  if (!mapboxToken) {
     reportError('Missing PUBLIC_MAPBOX_TOKEN in .env.');
     statusEl.innerHTML = `
       <strong>OSU Campus Bus Demo</strong>
@@ -50,10 +91,10 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
     };
   }
 
-  mapboxgl.accessToken = MAPBOX_TOKEN;
+  mapboxgl.accessToken = mapboxToken;
   const map = new mapboxgl.Map({
     container: mapEl,
-    style: MAP_STYLE,
+    style: mapStyle,
     center: [OSU_CENTER[1], OSU_CENTER[0]],
     zoom: 14,
     pitch: FOLLOW_PITCH,
@@ -71,16 +112,15 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
   let busLayer = null;
   let busModelTemplate = null;
   let busModelReady = false;
-  /** @type {Map<string, {model: THREE.Object3D, isMain: boolean | null}>} */
+  /** @type {Map<string, { model: THREE.Object3D; isMain: boolean | null }>} */
   const busInstances = new Map();
   let allBusPoses = [];
   let mainBusId = null;
   let hasFitBounds = false;
-  let mountHallName = 'Mount Hall Loop';
   let hasRenderedRoute = false;
   let isMapLoaded = false;
+  /** @type {unknown[] | null} */
   let pendingRoutePatterns = null;
-  let routePaths = [];
   let stopMarkers = [];
   let nextRefreshAt = Date.now() + REFRESH_MS;
   let countdownTimer = null;
@@ -90,15 +130,8 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
   let mapResizeRaf = null;
   let resizeObserver = null;
 
-  const pathTracker = {
-    pathIdx: -1,
-    segIdx: 0
-  };
-
   map.on('load', () => {
     isMapLoaded = true;
-    map.setPitch(FOLLOW_PITCH);
-    map.setBearing(FOLLOW_BEARING);
 
     if (pendingRoutePatterns) {
       renderRouteLines(pendingRoutePatterns);
@@ -119,7 +152,7 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
   });
 
   async function fetchVehicles() {
-    const response = await fetch(DATA_URL, { cache: 'no-store' });
+    const response = await fetch(dataUrl, { cache: 'no-store' });
     if (!response.ok) {
       throw new Error(`Request failed: ${response.status}`);
     }
@@ -128,7 +161,7 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
   }
 
   async function fetchRouteData() {
-    const response = await fetch(ROUTE_URL, { cache: 'no-store' });
+    const response = await fetch(routeUrl, { cache: 'no-store' });
     if (!response.ok) {
       throw new Error(`Route request failed: ${response.status}`);
     }
@@ -139,12 +172,11 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
     };
   }
 
-  function renderMountHallStop(stops) {
-    const stop = stops.find((item) => item.id === MOUNT_HALL_STOP_ID);
-    if (!stop) {
-      return;
+  function resolveStopLabel(stops) {
+    const stop = stops.find((item) => String(item.id) === targetStopId);
+    if (stop?.name) {
+      targetStopName = stop.name;
     }
-    mountHallName = stop.name ?? mountHallName;
   }
 
   function renderStopLabels(stops) {
@@ -153,16 +185,16 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
     }
 
     stopMarkers = stops.map((stop) => {
-      const isMountHall = stop.id === MOUNT_HALL_STOP_ID;
+      const isSelected = String(stop.id) === targetStopId;
 
       const wrapper = document.createElement('div');
       wrapper.className = 'stop-wrap';
 
       const dot = document.createElement('div');
-      dot.className = isMountHall ? 'stop-dot stop-dot--red' : 'stop-dot';
+      dot.className = isSelected ? 'stop-dot stop-dot--red' : 'stop-dot';
 
       const stem = document.createElement('div');
-      stem.className = isMountHall ? 'stop-stem stop-stem--red' : 'stop-stem';
+      stem.className = isSelected ? 'stop-stem stop-stem--red' : 'stop-stem';
 
       wrapper.appendChild(dot);
       wrapper.appendChild(stem);
@@ -173,190 +205,16 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
     });
   }
 
-  function decodePolyline(encoded) {
-    let index = 0;
-    let lat = 0;
-    let lng = 0;
-    const coordinates = [];
-
-    while (index < encoded.length) {
-      let result = 0;
-      let shift = 0;
-      let byte = null;
-
-      do {
-        byte = encoded.charCodeAt(index++) - 63;
-        result |= (byte & 0x1f) << shift;
-        shift += 5;
-      } while (byte >= 0x20);
-
-      const deltaLat = result & 1 ? ~(result >> 1) : result >> 1;
-      lat += deltaLat;
-
-      result = 0;
-      shift = 0;
-
-      do {
-        byte = encoded.charCodeAt(index++) - 63;
-        result |= (byte & 0x1f) << shift;
-        shift += 5;
-      } while (byte >= 0x20);
-
-      const deltaLng = result & 1 ? ~(result >> 1) : result >> 1;
-      lng += deltaLng;
-
-      coordinates.push([lat * 1e-5, lng * 1e-5]);
+  function removeRouteLayers() {
+    if (map.getLayer(LAYER.ROUTE_IB)) {
+      map.removeLayer(LAYER.ROUTE_IB);
     }
-
-    return coordinates;
-  }
-
-  function toRadians(value) {
-    return (value * Math.PI) / 180;
-  }
-
-  function toDegrees(value) {
-    return (value * 180) / Math.PI;
-  }
-
-  function distanceMeters(lng1, lat1, lng2, lat2) {
-    const R = 6371000;
-    const x = toRadians(lng2 - lng1) * Math.cos(toRadians((lat1 + lat2) / 2));
-    const y = toRadians(lat2 - lat1);
-    return Math.sqrt(x * x + y * y) * R;
-  }
-
-  function projectToSegment(point, start, end) {
-    const ax = start[0];
-    const ay = start[1];
-    const bx = end[0];
-    const by = end[1];
-    const px = point[0];
-    const py = point[1];
-    const dx = bx - ax;
-    const dy = by - ay;
-    const lengthSq = dx * dx + dy * dy;
-
-    if (lengthSq === 0) {
-      return { point: [ax, ay], t: 0, dist: distanceMeters(px, py, ax, ay) };
+    if (map.getLayer(LAYER.ROUTE_OB)) {
+      map.removeLayer(LAYER.ROUTE_OB);
     }
-
-    let t = ((px - ax) * dx + (py - ay) * dy) / lengthSq;
-    t = Math.max(0, Math.min(1, t));
-    const projection = [ax + t * dx, ay + t * dy];
-    const dist = distanceMeters(px, py, projection[0], projection[1]);
-    return { point: projection, t, dist };
-  }
-
-  function bearingDegrees(start, end) {
-    const lat1 = toRadians(start[1]);
-    const lat2 = toRadians(end[1]);
-    const dLng = toRadians(end[0] - start[0]);
-    const y = Math.sin(dLng) * Math.cos(lat2);
-    const x =
-      Math.cos(lat1) * Math.sin(lat2) -
-      Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
-    return (toDegrees(Math.atan2(y, x)) + 360) % 360;
-  }
-
-  function findClosestSnap(position) {
-    let best = null;
-    routePaths.forEach((path, pathIdx) => {
-      for (let i = 0; i < path.length - 1; i += 1) {
-        const projection = projectToSegment(position, path[i], path[i + 1]);
-        if (!best || projection.dist < best.dist) {
-          best = {
-            dist: projection.dist,
-            point: projection.point,
-            pathIdx,
-            segIdx: i,
-            path
-          };
-        }
-      }
-    });
-    return best;
-  }
-
-  function forwardLookingHeading(path, segIdx, fromPoint, meters) {
-    let remaining = meters;
-    let current = fromPoint;
-
-    for (let i = segIdx; i < path.length - 1; i += 1) {
-      const next = path[i + 1];
-      const start = i === segIdx ? current : path[i];
-      const segDist = distanceMeters(start[0], start[1], next[0], next[1]);
-
-      if (segDist >= remaining && segDist > 0) {
-        const fraction = remaining / segDist;
-        const aheadPoint = [
-          start[0] + (next[0] - start[0]) * fraction,
-          start[1] + (next[1] - start[1]) * fraction
-        ];
-        return bearingDegrees(fromPoint, aheadPoint);
-      }
-
-      remaining -= segDist;
-      current = next;
+    if (map.getSource(LAYER.ROUTE_SOURCE)) {
+      map.removeSource(LAYER.ROUTE_SOURCE);
     }
-
-    const lastPoint = path[path.length - 1];
-    if (distanceMeters(fromPoint[0], fromPoint[1], lastPoint[0], lastPoint[1]) > 1) {
-      return bearingDegrees(fromPoint, lastPoint);
-    }
-
-    return bearingDegrees(path[segIdx], path[Math.min(segIdx + 1, path.length - 1)]);
-  }
-
-  function computeSnapResult(path, segIdx, point) {
-    const LOOK_AHEAD_METERS = 40;
-    const heading = forwardLookingHeading(path, segIdx, point, LOOK_AHEAD_METERS);
-    return { position: point, heading };
-  }
-
-  function snapToRoute(position) {
-    if (!routePaths.length) {
-      return null;
-    }
-
-    const global = findClosestSnap(position);
-    if (!global || global.dist > 60) {
-      pathTracker.pathIdx = -1;
-      return null;
-    }
-
-    if (pathTracker.pathIdx < 0 || pathTracker.pathIdx >= routePaths.length) {
-      pathTracker.pathIdx = global.pathIdx;
-      pathTracker.segIdx = global.segIdx;
-    }
-
-    const trackedPath = routePaths[pathTracker.pathIdx];
-    const searchBack = 3;
-    const searchFwd = 15;
-    const low = Math.max(0, pathTracker.segIdx - searchBack);
-    const high = Math.min(trackedPath.length - 2, pathTracker.segIdx + searchFwd);
-
-    let localBest = null;
-    for (let i = low; i <= high; i += 1) {
-      const projection = projectToSegment(position, trackedPath[i], trackedPath[i + 1]);
-      if (!localBest || projection.dist < localBest.dist) {
-        localBest = {
-          dist: projection.dist,
-          point: projection.point,
-          segIdx: i
-        };
-      }
-    }
-
-    const PATH_SWITCH_THRESHOLD = 30;
-    if (!localBest || localBest.dist > global.dist + PATH_SWITCH_THRESHOLD) {
-      pathTracker.pathIdx = global.pathIdx;
-      pathTracker.segIdx = global.segIdx;
-      return computeSnapResult(global.path, global.segIdx, global.point);
-    }
-
-    pathTracker.segIdx = localBest.segIdx;
-    return computeSnapResult(trackedPath, localBest.segIdx, localBest.point);
   }
 
   function renderRouteLines(patterns) {
@@ -369,40 +227,33 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
       return;
     }
 
-    routePaths = patterns
-      .filter((pattern) => pattern.encodedPolyline)
-      .map((pattern) =>
-        decodePolyline(pattern.encodedPolyline).map(([lat, lng]) => [lng, lat])
-      );
-
-    const features = patterns
+    const decodedPatterns = patterns
       .filter((pattern) => pattern.encodedPolyline)
       .map((pattern) => ({
-        type: 'Feature',
-        properties: {
-          direction: pattern.direction ?? 'unknown'
-        },
-        geometry: {
-          type: 'LineString',
-          coordinates: decodePolyline(pattern.encodedPolyline).map(([lat, lng]) => [lng, lat])
-        }
+        direction: pattern.direction ?? 'unknown',
+        coordinates: decodePolyline(pattern.encodedPolyline).map(([lat, lng]) => [lng, lat])
       }));
+
+    routePaths = decodedPatterns.map((p) => p.coordinates);
+
+    const features = decodedPatterns.map((p) => ({
+      type: 'Feature',
+      properties: {
+        direction: p.direction
+      },
+      geometry: {
+        type: 'LineString',
+        coordinates: p.coordinates
+      }
+    }));
 
     if (features.length === 0) {
       return;
     }
 
-    if (map.getLayer('cc-route-ib')) {
-      map.removeLayer('cc-route-ib');
-    }
-    if (map.getLayer('cc-route-ob')) {
-      map.removeLayer('cc-route-ob');
-    }
-    if (map.getSource('cc-route')) {
-      map.removeSource('cc-route');
-    }
+    removeRouteLayers();
 
-    map.addSource('cc-route', {
+    map.addSource(LAYER.ROUTE_SOURCE, {
       type: 'geojson',
       data: {
         type: 'FeatureCollection',
@@ -421,9 +272,9 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
 
     map.addLayer(
       {
-        id: 'cc-route-ib',
+        id: LAYER.ROUTE_IB,
         type: 'line',
-        source: 'cc-route',
+        source: LAYER.ROUTE_SOURCE,
         filter: ['==', ['get', 'direction'], 'ib'],
         paint: {
           'line-color': '#0a8721',
@@ -440,9 +291,9 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
 
     map.addLayer(
       {
-        id: 'cc-route-ob',
+        id: LAYER.ROUTE_OB,
         type: 'line',
-        source: 'cc-route',
+        source: LAYER.ROUTE_SOURCE,
         filter: ['==', ['get', 'direction'], 'ob'],
         paint: {
           'line-color': '#0f5cad',
@@ -461,44 +312,8 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
     addBusLayerIfNeeded();
   }
 
-  function normalizeHeading(heading) {
-    if (!Number.isFinite(heading)) {
-      return 0;
-    }
-    const normalized = heading % 360;
-    return normalized < 0 ? normalized + 360 : normalized;
-  }
-
-  function angleDifference(a, b) {
-    const diff = Math.abs(normalizeHeading(a) - normalizeHeading(b));
-    return Math.min(diff, 360 - diff);
-  }
-
   function getVehiclePose(vehicle) {
-    const id = vehicle.id ?? `${vehicle.latitude},${vehicle.longitude}`;
-    const rawPosition = [vehicle.longitude, vehicle.latitude];
-    const snapped = snapToRoute(rawPosition);
-    const position = snapped ? snapped.position : rawPosition;
-    let heading = vehicle.heading;
-
-    if (snapped) {
-      const routeHeading = snapped.heading;
-      const flipped = normalizeHeading(routeHeading + 180);
-      if (Number.isFinite(heading)) {
-        heading =
-          angleDifference(routeHeading, heading) <= angleDifference(flipped, heading)
-            ? routeHeading
-            : flipped;
-      } else {
-        heading = routeHeading;
-      }
-    }
-
-    return {
-      id,
-      position,
-      heading: Number.isFinite(heading) ? heading : null
-    };
+    return getVehiclePoseFromSnap(snapToRoute, vehicle);
   }
 
   function addBusLayerIfNeeded() {
@@ -506,12 +321,12 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
       return;
     }
 
-    if (!busLayer) {
-      busLayer = createBusLayer();
+    if (map.getLayer(LAYER.BUS_3D)) {
+      return;
     }
 
-    if (map.getLayer('bus-3d-layer')) {
-      map.removeLayer('bus-3d-layer');
+    if (!busLayer) {
+      busLayer = createBusLayer();
     }
 
     map.addLayer(busLayer);
@@ -519,9 +334,8 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
 
   function createBusLayer() {
     return {
-      id: 'bus-3d-layer',
+      id: LAYER.BUS_3D,
       type: 'custom',
-      renderingMode: '3d',
       onAdd(layerMap, gl) {
         busScene = new THREE.Scene();
         busCamera = new THREE.Camera();
@@ -529,7 +343,7 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
 
         const loader = new GLTFLoader();
         loader.load(
-          BUS_MODEL_URL,
+          busModelUrl,
           (gltf) => {
             busModelTemplate = gltf.scene;
             busModelReady = true;
@@ -537,7 +351,7 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
           undefined,
           (error) => {
             reportError(
-              `3D model failed to load: ${error?.message || error?.toString?.() || BUS_MODEL_URL}`
+              `3D model failed to load: ${error?.message || error?.toString?.() || busModelUrl}`
             );
           }
         );
@@ -591,6 +405,8 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
           }
         }
 
+        const mapMatrix = new THREE.Matrix4().fromArray(matrix);
+
         for (const pose of allBusPoses) {
           const instance = busInstances.get(pose.id);
           if (!instance) {
@@ -616,8 +432,7 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
             .multiply(new THREE.Matrix4().makeRotationZ(headingRad))
             .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2));
 
-          const mapMatrix = new THREE.Matrix4().fromArray(matrix);
-          busCamera.projectionMatrix = mapMatrix.multiply(modelMatrix);
+          busCamera.projectionMatrix = mapMatrix.clone().multiply(modelMatrix);
           busRenderer.render(busScene, busCamera);
         }
 
@@ -647,65 +462,8 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
     });
   }
 
-  function findArrivals(vehicles) {
-    const arrivals = [];
-
-    vehicles.forEach((vehicle) => {
-      const predictions = Array.isArray(vehicle.predictions) ? vehicle.predictions : [];
-
-      predictions.forEach((prediction) => {
-        if (prediction.stopId !== MOUNT_HALL_STOP_ID) {
-          return;
-        }
-
-        const seconds = Number(prediction.timeToArrivalInSeconds);
-        if (!Number.isFinite(seconds)) {
-          return;
-        }
-        const distanceFeet = Number(prediction.vehicleDistanceInFeet);
-
-        arrivals.push({
-          seconds,
-          distanceFeet: Number.isFinite(distanceFeet) ? distanceFeet : null,
-          vehicleId: vehicle.id ?? 'n/a',
-          isDelayed: prediction.isDelayed ?? false,
-          predictionTime: prediction.predictionTime ?? null
-        });
-      });
-    });
-
-    arrivals.sort((a, b) => {
-      if (Number.isFinite(a.distanceFeet) && Number.isFinite(b.distanceFeet)) {
-        return a.distanceFeet - b.distanceFeet;
-      }
-      return a.seconds - b.seconds;
-    });
-    return arrivals;
-  }
-
-  function getActionMessage(arrival) {
-    if (!arrival || !Number.isFinite(arrival.seconds)) {
-      return 'No guidance';
-    }
-
-    const seconds = Math.max(0, Math.round(arrival.seconds));
-    if (seconds >= 240) {
-      return 'Start packing';
-    }
-    if (seconds >= 120) {
-      return 'Time to go';
-    }
-    if (seconds >= 90) {
-      return 'You need to go now';
-    }
-    if (seconds <= 30) {
-      return 'Forget it, wait for next one';
-    }
-    return 'Head out soon';
-  }
-
   function findVehicleById(vehicles, vehicleId) {
-    return vehicles.find((vehicle) => vehicle.id === vehicleId) ?? null;
+    return vehicles.find((vehicle) => String(vehicle.id) === String(vehicleId)) ?? null;
   }
 
   function updateCountdown() {
@@ -838,7 +596,16 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
   }
 
-  function renderStatus(vehicles, arrivals) {
+  function escapeHtml(text) {
+    return String(text)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }
+
+  function renderStatus(arrivals) {
     const nextArrival = arrivals[0] ?? null;
     const followingArrival = arrivals[1] ?? null;
 
@@ -877,11 +644,18 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
 
     statusEl.innerHTML = `
       <div class="hud-time">
-        <span class="hud-time-value">${minutes !== null ? minutes : '--'}</span>
-        <span class="hud-time-unit">min</span>
+        <span class="hud-time-heading">How long away</span>
+        <div class="hud-time-row">
+          <span class="hud-time-value">${minutes !== null ? minutes : '--'}</span>
+          <span class="hud-time-unit">min</span>
+        </div>
       </div>
       <div class="hud-sep"></div>
       <div class="hud-info">
+        <div class="hud-info-row">
+          <span class="hud-info-label">Stop</span>
+          <span class="hud-info-value">${escapeHtml(targetStopName)}</span>
+        </div>
         <div class="hud-info-row">
           <span class="hud-info-label">ETA</span>
           <span class="hud-info-value">${etaShort}</span>
@@ -901,11 +675,11 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
   async function refresh() {
     try {
       const [vehicles, routeData] = await Promise.all([fetchVehicles(), fetchRouteData()]);
-      renderMountHallStop(routeData.stops);
+      resolveStopLabel(routeData.stops);
       renderStopLabels(routeData.stops);
       renderRouteLines(routeData.patterns);
 
-      const arrivals = findArrivals(vehicles);
+      const arrivals = findArrivals(vehicles, targetStopId);
       const nextArrival = arrivals[0] ?? null;
       const nextVehicle = nextArrival ? findVehicleById(vehicles, nextArrival.vehicleId) : null;
 
@@ -916,31 +690,23 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
           ? normalizeHeading(pose.heading)
           : map.getBearing();
 
-        if (!hasFitBounds) {
-          map.jumpTo({
-            center: followCenter,
-            zoom: FOLLOW_ZOOM,
-            pitch: FOLLOW_PITCH,
-            bearing: followHeading,
-            offset: FOLLOW_OFFSET
-          });
-          hasFitBounds = true;
-        } else {
-          map.easeTo({
-            center: followCenter,
-            zoom: FOLLOW_ZOOM,
-            pitch: FOLLOW_PITCH,
-            bearing: followHeading,
-            offset: FOLLOW_OFFSET,
-            duration: 900,
-            easing: (t) => t * (2 - t)
-          });
-        }
+        map.easeTo({
+          center: followCenter,
+          zoom: FOLLOW_ZOOM,
+          pitch: FOLLOW_PITCH,
+          bearing: followHeading,
+          offset: FOLLOW_OFFSET,
+          duration: hasFitBounds ? 2000 : 3000,
+          easing: (t) => t * (2 - t)
+        });
+        hasFitBounds = true;
       }
 
       renderVehicles(vehicles, nextVehicle?.id ?? null);
-      renderStatus(vehicles, arrivals);
+      renderStatus(arrivals);
+      onFleetUpdate(buildFleetRows(vehicles, targetStopId));
     } catch (error) {
+      onFleetUpdate([]);
       reportError(
         `Refresh failed: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
@@ -972,9 +738,46 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
     resizeObserver.observe(appEl);
   }
 
+  function updateConfig(newConfig) {
+    const routeChanged =
+      (newConfig.routeUrl && newConfig.routeUrl !== routeUrl) ||
+      (newConfig.dataUrl && newConfig.dataUrl !== dataUrl);
+
+    if (newConfig.dataUrl) dataUrl = newConfig.dataUrl;
+    if (newConfig.routeUrl) routeUrl = newConfig.routeUrl;
+    if (newConfig.stopId != null) targetStopId = String(newConfig.stopId);
+    if (newConfig.stopName != null) targetStopName = newConfig.stopName;
+
+    if (routeChanged) {
+      stopMarkers.forEach((marker) => marker.remove());
+      stopMarkers = [];
+      hasRenderedRoute = false;
+      routePaths = [];
+      resetPathTracker();
+
+      allBusPoses = [];
+      busInstances.forEach((instance) => {
+        if (busScene) busScene.remove(instance.model);
+      });
+      busInstances.clear();
+      mainBusId = null;
+
+      removeRouteLayers();
+    } else {
+      stopMarkers.forEach((marker) => marker.remove());
+      stopMarkers = [];
+    }
+
+    hasFitBounds = false;
+    if (refreshTimer) clearInterval(refreshTimer);
+    refresh();
+    refreshTimer = window.setInterval(refresh, REFRESH_MS);
+  }
+
   return {
     supportsDocumentPictureInPicture,
     togglePictureInPictureWindow,
+    updateConfig,
     destroy() {
       document.removeEventListener('keydown', keydownHandler);
       if (refreshTimer) {
@@ -992,6 +795,8 @@ export function createBusTracker({ appEl, mapEl, statusEl, config, reportError =
       if (pipWindow && !pipWindow.closed) {
         pipWindow.close();
       }
+
+      onFleetUpdate([]);
 
       stopMarkers.forEach((marker) => marker.remove());
       stopMarkers = [];

@@ -1,0 +1,3 @@
+name = "cabs-testing"
+compatibility_date = "2025-05-12"
+pages_build_output_dir = ".svelte-kit/cloudflare"

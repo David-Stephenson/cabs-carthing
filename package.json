@@ -2,28 +2,29 @@
   "name": "cabs-testing",
   "version": "1.0.0",
   "private": true,
-  "description": "Static SvelteKit bus tracker for the OSU CABS Mount Hall stop",
+  "description": "SvelteKit OSU campus bus tracker with route/stop picker and bookmarkable URLs",
   "scripts": {
     "sync": "svelte-kit sync",
     "dev": "svelte-kit sync && vite dev",
     "build": "svelte-kit sync && vite build",
     "preview": "vite preview",
+    "preview:cf": "wrangler pages dev .svelte-kit/cloudflare",
     "check": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/David-Stephenson/cabs-carthing.git"
+    "url": "git+https://github.com/David-Stephenson/OSU-Cabs-Dasdhboard.git"
   },
   "keywords": [],
-  "author": "",
+  "author": "David Stephenson <git@davidstephenson.net>",
   "license": "ISC",
   "type": "module",
   "bugs": {
-    "url": "https://github.com/David-Stephenson/cabs-carthing/issues"
+    "url": "https://github.com/David-Stephenson/OSU-Cabs-Dasdhboard/issues"
   },
-  "homepage": "https://github.com/David-Stephenson/cabs-carthing#readme",
+  "homepage": "https://github.com/David-Stephenson/OSU-Cabs-Dasdhboard#readme",
   "devDependencies": {
-    "@sveltejs/adapter-vercel": "^6.3.3",
+    "@sveltejs/adapter-cloudflare": "^7.2.8",
     "@sveltejs/kit": "^2.53.4",
     "@sveltejs/vite-plugin-svelte": "^6.2.4",
     "@tailwindcss/vite": "^4.2.1",
@@ -31,7 +32,8 @@
     "svelte-check": "^4.4.5",
     "tailwindcss": "^4.2.1",
     "typescript": "^5.9.3",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "wrangler": "^4.90.1"
   },
   "dependencies": {
     "mapbox-gl": "^3.18.0",
