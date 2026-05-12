@@ -13,16 +13,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/David-Stephenson/OSU-Cabs-Dasdhboard.git"
+    "url": "git+https://github.com/David-Stephenson/OSU-Cabs-Dashboard.git"
   },
   "keywords": [],
   "author": "David Stephenson <git@davidstephenson.net>",
   "license": "ISC",
   "type": "module",
   "bugs": {
-    "url": "https://github.com/David-Stephenson/OSU-Cabs-Dasdhboard/issues"
+    "url": "https://github.com/David-Stephenson/OSU-Cabs-Dashboard/issues"
   },
-  "homepage": "https://github.com/David-Stephenson/OSU-Cabs-Dasdhboard#readme",
+  "homepage": "https://github.com/David-Stephenson/OSU-Cabs-Dashboard#readme",
   "devDependencies": {
     "@sveltejs/adapter-cloudflare": "^7.2.8",
     "@sveltejs/kit": "^2.53.4",

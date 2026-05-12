@@ -43,11 +43,11 @@ Set the same `PUBLIC_*` variables in your hosting provider’s environment setti
 ## Repository
 
 ```bash
-git clone git@github.com:David-Stephenson/OSU-Cabs-Dasdhboard.git
-cd OSU-Cabs-Dasdhboard
+git clone git@github.com:David-Stephenson/OSU-Cabs-Dashboard.git
+cd OSU-Cabs-Dashboard
 ```
 
-HTTPS: `https://github.com/David-Stephenson/OSU-Cabs-Dasdhboard.git`
+HTTPS: `https://github.com/David-Stephenson/OSU-Cabs-Dashboard.git`
 
 ## License
 
